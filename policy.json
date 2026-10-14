@@ -1,0 +1,12 @@
+{
+  "commands": {
+    "allow": ["python3 -m unittest -v", "pwd"],
+    "deny": ["rm -rf .", "bash -c whoami"]
+  },
+  "directories": {"allow": ["."], "deny": ["private"]},
+  "protectedFiles": ["test_order.py"],
+  "timeoutSeconds": 15,
+  "maxOutputBytes": 16384,
+  "maxFileBytes": 131072,
+  "maxWorkspaceBytes": 524288
+}
