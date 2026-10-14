@@ -8,7 +8,6 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Instant
 
-/** Sequential runtime. Database transactions contain no model, shell, or file operations. */
 class AgentRuntime(
     private val store: Store, private val model: Model,
     private val fault: (String, ProposedCall) -> Unit = { _, _ -> },
@@ -26,7 +25,8 @@ class AgentRuntime(
             Work only inside workspace, preserve tests, and obey policy. First inspect with list_files/read_file and submit_plan.
             The plan must have ordered tasks, dependencies and verifiable checks. Suggested workflow: read source, write fix, run tests.
             Each step lists required tools. check.kind is file_read, file_written, file_deleted or tests_passed; check.path is a relative file path, or '.' for tests.
-            Use only the current execution task. To complete it call finish_task with the successful evidence_call_id.
+            Use only the current execution task. To complete it call finish_task with the exact successful tool call ID.
+            Copy evidence_call_id from facts.call_id in the tool result. Never use a task number or message number.
             submit_plan and finish_task must each be the only call in a response. Other tools may be batched.
             Tool errors and user refusals are results: adapt to them. Return final text after all tasks have evidence.
             Never claim tests passed unless Bash returned exitCode 0. Bash is unavailable before plan approval.
@@ -48,9 +48,11 @@ class AgentRuntime(
             val policy = policy(run)
             val task = currentTask(run)
             run.messages += Message("system", "Runtime phase=${run.phase}; current task=${task?.let { json.toJson(it) } ?: "none"}; " +
+                "successful calls for current task=${json.toJson(evidenceCalls(run).map { mapOf("id" to it.request.id, "tool" to it.request.name) })}; " +
+                "finish_task.evidence_call_id must exactly match one of these IDs, not a task number; " +
                 "allowed Bash commands=${json.toJson(policy.config.commands.allow)}; spent budget=${json.toJson(run.spent)} of ${json.toJson(run.limits)}")
             run.spent.modelRequests++
-            store.save(run) // A failed HTTP request still spends budget.
+            store.save(run)
             val reply = try {
                 model.reply(run.messages.toList(), Tools.specs.filter { run.phase != RunPhase.PLANNING || it.name in setOf("read_file", "list_files", "submit_plan") })
             } catch (e: Exception) {
@@ -79,7 +81,7 @@ class AgentRuntime(
             run.status = RunStatus.FAILED; run.note = "Protocol error: invalid tool_call_id"; store.save(run); return
         }
         run.spent.toolCalls += requests.size
-        run.spent.sideEffects += effects // Reserve the whole batch, including later refused actions; never refund these counters.
+        run.spent.sideEffects += effects
         val controlInBatch = requests.size > 1 && requests.any { it.name in setOf("submit_plan", "finish_task") }
         newCalls.forEach { run.calls += Call(it, if (run.phase == RunPhase.EXECUTION) currentTask(run)?.id else null,
             state = if (controlInBatch) "INVALID_BATCH" else "QUEUED") }
@@ -99,7 +101,7 @@ class AgentRuntime(
         }
         val policy = policy(run)
         try {
-            policy.validate(run, request) // Repeated after resume and after approval.
+            policy.validate(run, request)
             require(call.state != "INVALID_BATCH") { "submit_plan/finish_task must be called alone" }
             if (run.phase == RunPhase.EXECUTION) {
                 val task = currentTask(run) ?: error("No runnable task")
@@ -126,7 +128,7 @@ class AgentRuntime(
         call.attempts += attempt
         call.state = "STARTED"
         run.spent.resultBytes += cap
-        store.save(run) // Atomic budget reservation + STARTED + before snapshot.
+        store.save(run)
         fault("before_execute", request)
         var result = try {
             when (request.name) {
@@ -148,14 +150,15 @@ class AgentRuntime(
                 run.note = "Command changed protected files: $protectedChanges. Inspect diff."
             }
         }
-        fault("after_execute", request) // Deterministic crash point: effect exists, saved state is still STARTED.
+        fault("after_execute", request)
+        result.facts["call_id"] = request.id
         val fitted = fit(result, cap)
-        run.spent.resultBytes -= cap - resultSize(fitted) // Only unused reservation from a normally completed attempt.
+        run.spent.resultBytes -= cap - resultSize(fitted)
         attempt.state = "DONE"; attempt.result = fitted
         call.state = "DONE"; call.result = fitted; call.before = null
         appendResult(run, request, fitted)
         store.save(run)
-        if (request.name in setOf("submit_plan", "finish_task")) output(checklist(run))
+        report(run, request, fitted)
     }
 
     private fun capacity(run: AgentRun, policy: Policy) = minOf(policy.config.maxOutputBytes,
@@ -173,6 +176,18 @@ class AgentRuntime(
         if (call != null) { call.state = "DONE"; call.result = fitted }
         appendResult(run, request, fitted)
         store.save(run)
+        report(run, request, fitted)
+    }
+
+    private fun report(run: AgentRun, request: ProposedCall, result: ToolResult) {
+        if (!result.ok) output("${request.name}: ошибка: ${result.output}")
+        else if (request.name in setOf("submit_plan", "finish_task")) output(checklist(run))
+        else output("${request.name}: готово")
+    }
+
+    private fun evidenceCalls(run: AgentRun): List<Call> {
+        val task = currentTask(run) ?: return emptyList()
+        return run.calls.filter { it.taskId == task.id && it.state == "DONE" && it.result?.ok == true }.takeLast(8)
     }
 
     private fun submitPlan(run: AgentRun, request: ProposedCall, policy: Policy): ToolResult {
@@ -205,7 +220,8 @@ class AgentRuntime(
     private fun finishTask(run: AgentRun, request: ProposedCall, policy: Policy): ToolResult {
         val task = currentTask(run) ?: error("No runnable task")
         val evidenceId = obj(request.arguments)["evidence_call_id"].asString
-        val evidence = run.calls.find { it.request.id == evidenceId } ?: error("Unknown evidence")
+        val evidence = run.calls.find { it.request.id == evidenceId }
+            ?: error("Unknown evidence_call_id '$evidenceId'. Copy an exact successful call ID: ${evidenceCalls(run).map { it.request.id }}")
         require(evidence.state == "DONE" && evidence.taskId == task.id && evidence.result?.ok == true) { "Evidence must be a successful call of this task" }
         val result = evidence.result!!
         val expectedPath = policy.path(task.check.path)
@@ -287,7 +303,6 @@ class AgentRuntime(
             appendResult(run, run.pending.first(), result)
             if (decision == "abort") run.status = RunStatus.FAILED
         }
-        // Never refund output capacity reserved by a crashed attempt.
         store.save(run)
         return run
     }

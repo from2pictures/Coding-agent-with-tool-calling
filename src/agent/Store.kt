@@ -18,7 +18,6 @@ import java.util.concurrent.TimeUnit
 
 interface Store : AutoCloseable {
     fun load(id: String): AgentRun
-    /** Atomically save the state and newly appended messages. Reject stale revisions. */
     fun save(run: AgentRun)
     override fun close() {}
 }

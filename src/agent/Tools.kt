@@ -39,7 +39,7 @@ object Tools {
             }}
           }}
         """)),
-        ToolSpec("finish_task", "Complete the current task using a successful tool call as evidence. Call alone.", fields("evidence_call_id"))
+        ToolSpec("finish_task", "Complete the current task. Copy evidence_call_id exactly from facts.call_id of its successful tool result, never a task or message number. Call alone.", fields("evidence_call_id"))
     )
     fun sideEffect(name: String) = name in setOf("write_file", "delete_file", "Bash")
     fun repeatable(name: String) = name in setOf("list_files", "read_file", "write_file", "delete_file", "submit_plan", "finish_task")
@@ -50,7 +50,6 @@ object Tools {
         return obj(call.arguments).also { validateSchema(it, spec.schema, "arguments") }
     }
 
-    // Complete validator for the JSON Schema subset used by every tool above.
     private fun validateSchema(value: JsonElement, schema: JsonObject, at: String) {
         val type = schema["type"].asString
         when (type) {

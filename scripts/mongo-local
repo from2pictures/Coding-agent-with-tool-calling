@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+root="$PWD/.local/mongo"
+version=8.0.12
+binary="$root/mongodb-macos-aarch64-$version/bin/mongod"
+pidfile="$root/mongod.pid"
+
+case "${1:-start}" in
+  start|stop) action="${1:-start}" ;;
+  *) echo 'Usage: ./scripts/mongo-local start|stop' >&2; exit 1 ;;
+esac
+if [[ -f "$pidfile" ]]; then
+  pid=$(cat "$pidfile")
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    command=$(ps -p "$pid" -o command=)
+    if [[ "$command" != "$binary "* || "$command" != *"--dbpath $root/data"* ]]; then
+      echo 'PID belongs to another process; refusing to use it.' >&2; exit 1
+    fi
+    if [[ "$action" == stop ]]; then
+      kill -TERM "$pid"
+      for _ in {1..60}; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+          echo 'MongoDB stopped; data retained in .local/mongo/data'; exit 0
+        fi
+        sleep 1
+      done
+      echo 'Shutdown still in progress; see .local/mongo/mongod.log' >&2; exit 1
+    fi
+    running=yes
+  fi
+fi
+if [[ "$action" == stop ]]; then echo 'MongoDB is already stopped'; exit 0; fi
+[[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || {
+  echo 'This helper supports macOS Apple Silicon. Use docker compose on other systems.' >&2; exit 1;
+}
+if [[ -z "${JAVA_HOME:-}" ]]; then
+  export JAVA_HOME
+  JAVA_HOME=$(/usr/libexec/java_home -v 21)
+fi
+./gradlew --no-daemon -q installDist
+mkdir -p "$root/data"
+if [[ ! -x "$binary" ]]; then
+  archive="mongodb-macos-arm64-$version.tgz"
+  curl --fail --location --retry 2 "https://fastdl.mongodb.org/osx/$archive" -o "$root/$archive"
+  curl --fail --location --retry 2 "https://fastdl.mongodb.org/osx/$archive.sha256" -o "$root/$archive.sha256"
+  (cd "$root" && shasum -a 256 -c "$archive.sha256")
+  tar -xzf "$root/$archive" -C "$root"
+  rm "$root/$archive" "$root/$archive.sha256"
+fi
+if [[ "${running:-no}" != yes ]]; then
+  "$binary" --dbpath "$root/data" --logpath "$root/mongod.log" \
+    --pidfilepath "$pidfile" --port 27017 --bind_ip 127.0.0.1 \
+    --replSet rs0 --oplogSize 128 --fork
+fi
+"$JAVA_HOME/bin/java" -cp 'build/install/coding-agent/lib/*' agent.LocalMongoKt "$root/data"

@@ -62,7 +62,7 @@ class MongoIntegrationTest {
             val run = create(store)
             val oldRevision = run.revision
             run.spent.toolCalls = 77
-            run.savedMessages = 0 // Deliberate duplicate sequence: message insertion fails after state replacement.
+            run.savedMessages = 0
             assertFails { store.save(run) }
             val restored = store.load(run.id.toString())
             assertEquals(oldRevision, restored.revision)

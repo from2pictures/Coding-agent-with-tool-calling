@@ -16,7 +16,6 @@ data class PolicyConfig(
     val maxFileBytes: Int = 131072, val maxWorkspaceBytes: Int = 524288
 )
 
-/** A deliberately small command language. Allowlisting an interpreter alone is unsafe. */
 class Policy(val root: Path, val config: PolicyConfig) {
     private val allow = config.directories.allow.map(::directory)
     private val deny = config.directories.deny.map(::directory)
@@ -69,7 +68,6 @@ class Policy(val root: Path, val config: PolicyConfig) {
 
     fun command(command: String) {
         require(command !in config.commands.deny && command in config.commands.allow) { "Command denied by policy: $command" }
-        // No shell operators, arbitrary flags, paths, code strings, or nested interpreters.
         require(command == "pwd" || command.matches(Regex("sleep [0-9]{1,3}")) ||
             command.matches(Regex("python3? (?:-B )?-m unittest(?: -v)?"))) { "Unsupported Bash syntax or arguments" }
     }

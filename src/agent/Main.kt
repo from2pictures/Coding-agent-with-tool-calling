@@ -86,7 +86,6 @@ fun main(raw: Array<String>) {
             })
             val workspace = existing?.workspaceRoot?.let(Path::of) ?: Path.of(args.options["--workspace"] ?: "workspace").toRealPath()
             val policy = existing?.policyPath?.let(Path::of) ?: Path.of(args.options["--policy"] ?: "policy.json").toRealPath()
-            // One local CLI writer per workspace. File locks are released by the OS after a crash.
             val lockDir = policy.parent.resolve(".agent-locks")
             require(!lockDir.startsWith(workspace)) { "Lock directory must be outside workspace" }
             Files.createDirectories(lockDir)

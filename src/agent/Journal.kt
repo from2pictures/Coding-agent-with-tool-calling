@@ -45,7 +45,6 @@ class Journal(private val policy: Policy) {
 
     fun restore(run: AgentRun) {
         val changes = run.journal.filterValues { it.before != it.after }
-        // Preflight EVERY file before writing the first one. Explicit rollback authorizes deletion too.
         changes.forEach { (name, change) ->
             val path = policy.path(name, true)
             val actual = if (Files.exists(path)) sha(Files.readAllBytes(path)) else null

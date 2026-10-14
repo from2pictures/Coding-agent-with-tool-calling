@@ -9,7 +9,6 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.*
 
-/** Test double with the same atomic save / optimistic revision contract as MongoStore. */
 class MemoryStore : Store {
     private val states = mutableMapOf<String, String>()
     private val history = mutableMapOf<String, List<String>>()
@@ -90,6 +89,36 @@ class RuntimeTest {
         runtime(happyReplies()).rollback(id)
         assertEquals(broken, Files.readString(workspace().resolve("order.py")))
         assertEquals(tests, Files.readString(workspace().resolve("test_order.py")))
+    }
+
+    @Test fun `model can discover evidence id and recover from using a task number`() {
+        val output = mutableListOf<String>()
+        val readId = "call-" + java.util.UUID.randomUUID()
+        val rt = AgentRuntime(store, Model { messages, _ ->
+            when (messages.count { it.role == "assistant" }) {
+                0 -> plan(task("1", "file_read", tools = listOf("read_file")))
+                1 -> reply(call(readId, "read_file", "path" to "order.py"))
+                2 -> {
+                    val body = obj(messages.last { it.role == "tool" }.content)
+                    assertEquals(readId, body.getAsJsonObject("facts")["call_id"].asString)
+                    finish("wrong-id", "1")
+                }
+                3 -> {
+                    val feedback = obj(messages.last { it.role == "tool" }.content)
+                    assertFalse(feedback["ok"].asBoolean)
+                    assertTrue(feedback["output"].asString.contains(readId))
+                    assertTrue(messages.last().content.contains(readId))
+                    val evidence = obj(messages.first { it.callId == readId }.content).getAsJsonObject("facts")["call_id"].asString
+                    finish("correct-id", evidence)
+                }
+                else -> Message("assistant", "Read verified")
+            }
+        }, output = { output += it })
+        val run = rt.drive(create(rt))
+        assertEquals(RunStatus.COMPLETED, run.status)
+        assertEquals(readId, run.plan!!.steps.single().evidence)
+        assertTrue(output.any { it.startsWith("finish_task: ошибка:") })
+        assertEquals(1, output.count { it.startsWith("[ ]") })
     }
 
     @Test fun `plan mode forbids all side effects including Bash until approval`() {
@@ -277,7 +306,7 @@ class RuntimeTest {
             reply(call("create", "write_file", "path" to "new.txt", "content" to "new")), finish("done-create", "create"),
             reply(call("delete", "delete_file", "path" to "old.txt")), finish("done-delete", "delete"), Message("assistant", "Done")))
         val id = create(rt)
-        assertEquals(RunStatus.WAITING_ACTION, rt.drive(id).status) // deletion asks even in AUTO
+        assertEquals(RunStatus.WAITING_ACTION, rt.drive(id).status)
         assertTrue(Files.exists(workspace().resolve("old.txt")))
         rt.decideAction(id, true)
         assertEquals(RunStatus.COMPLETED, rt.drive(id).status)
